@@ -1,5 +1,7 @@
 package org.schabi.newpipe.util;
 
+import static org.schabi.newpipe.extractor.utils.Utils.isNullOrEmpty;
+
 import android.content.Context;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -16,16 +18,23 @@ import androidx.collection.SparseArrayCompat;
 import org.schabi.newpipe.DownloaderImpl;
 import org.schabi.newpipe.R;
 import org.schabi.newpipe.extractor.MediaFormat;
+import org.schabi.newpipe.extractor.downloader.Response;
 import org.schabi.newpipe.extractor.stream.AudioStream;
 import org.schabi.newpipe.extractor.stream.Stream;
 import org.schabi.newpipe.extractor.stream.SubtitlesStream;
 import org.schabi.newpipe.extractor.stream.VideoStream;
+import org.schabi.newpipe.extractor.utils.Parser;
+import org.schabi.newpipe.extractor.utils.Utils;
 
 import java.io.Serializable;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
 
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
 import io.reactivex.rxjava3.core.Single;
@@ -228,6 +237,7 @@ public class StreamItemAdapter<T extends Stream, U extends Stream> extends BaseA
 
         private final List<T> streamsList;
         private final long[] streamSizes;
+        private final MediaFormat[] streamFormats;
         private final String unknownSize;
 
         public StreamInfoWrapper(@NonNull final List<T> streamList,
@@ -236,31 +246,42 @@ public class StreamItemAdapter<T extends Stream, U extends Stream> extends BaseA
             this.streamSizes = new long[streamsList.size()];
             this.unknownSize = context == null
                     ? "--.-" : context.getString(R.string.unknown_content);
-
-            resetSizes();
+            this.streamFormats = new MediaFormat[streamsList.size()];
+            resetInfo();
         }
 
         /**
-         * Helper method to fetch the sizes of all the streams in a wrapper.
+         * Helper method to fetch the sizes and missing media formats
+         * of all the streams in a wrapper.
          *
          * @param <X> the stream type's class extending {@link Stream}
          * @param streamsWrapper the wrapper
          * @return a {@link Single} that returns a boolean indicating if any elements were changed
          */
         @NonNull
-        public static <X extends Stream> Single<Boolean> fetchSizeForWrapper(
+        public static <X extends Stream> Single<Boolean> fetchMoreInfoForWrapper(
                 final StreamInfoWrapper<X> streamsWrapper) {
             final Callable<Boolean> fetchAndSet = () -> {
                 boolean hasChanged = false;
                 for (final X stream : streamsWrapper.getStreamsList()) {
-                    if (streamsWrapper.getSizeInBytes(stream) > SIZE_UNSET) {
+                    final boolean changeSize = streamsWrapper.getSizeInBytes(stream) <= SIZE_UNSET;
+                    final boolean changeFormat = stream.getFormat() == null;
+                    if (!changeSize && !changeFormat) {
                         continue;
                     }
-
-                    final long contentLength = DownloaderImpl.getInstance().getContentLength(
-                            stream.getContent());
-                    streamsWrapper.setSize(stream, contentLength);
-                    hasChanged = true;
+                    final Response response = DownloaderImpl.getInstance()
+                            .head(stream.getContent());
+                    if (changeSize) {
+                        final String contentLength = response.getHeader("Content-Length");
+                        if (!isNullOrEmpty(contentLength)) {
+                            streamsWrapper.setSize(stream, Long.parseLong(contentLength));
+                            hasChanged = true;
+                        }
+                    }
+                    if (changeFormat) {
+                        hasChanged = retrieveMediaFormat(stream, streamsWrapper, response)
+                                || hasChanged;
+                    }
                 }
                 return hasChanged;
             };
@@ -271,8 +292,137 @@ public class StreamItemAdapter<T extends Stream, U extends Stream> extends BaseA
                     .onErrorReturnItem(true);
         }
 
-        public void resetSizes() {
+        /**
+         * Try to retrieve the {@link MediaFormat} for a stream from the request headers.
+         *
+         * @param <X>            the stream type to get the {@link MediaFormat} for
+         * @param stream         the stream to find the {@link MediaFormat} for
+         * @param streamsWrapper the wrapper to store the found {@link MediaFormat} in
+         * @param response       the response of the head request for the given stream
+         * @return {@code true} if the media format could be retrieved; {@code false} otherwise
+         */
+        private static <X extends Stream> boolean retrieveMediaFormat(
+                @NonNull final X stream,
+                @NonNull final StreamInfoWrapper<X> streamsWrapper,
+                @NonNull final Response response) {
+            return retrieveMediaFormatFromFileTypeHeaders(stream, streamsWrapper, response)
+                    || retrieveMediaFormatFromContentDispositionHeader(
+                            stream, streamsWrapper, response)
+                    || retrieveMediaFormatFromContentTypeHeader(stream, streamsWrapper, response);
+        }
+
+        private static <X extends Stream> boolean retrieveMediaFormatFromFileTypeHeaders(
+                @NonNull final X stream,
+                @NonNull final StreamInfoWrapper<X> streamsWrapper,
+                @NonNull final Response response) {
+            // try to use additional headers from CDNs or servers,
+            // e.g. x-amz-meta-file-type (e.g. for SoundCloud)
+            final List<String> keys = response.responseHeaders().keySet().stream()
+                    .filter(k -> k.endsWith("file-type")).collect(Collectors.toList());
+            if (!keys.isEmpty()) {
+                for (final String key : keys) {
+                    final String suffix = response.getHeader(key);
+                    final MediaFormat format = MediaFormat.getFromSuffix(suffix);
+                    if (format != null) {
+                        streamsWrapper.setFormat(stream, format);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private static <X extends Stream> boolean retrieveMediaFormatFromContentDispositionHeader(
+                @NonNull final X stream,
+                @NonNull final StreamInfoWrapper<X> streamsWrapper,
+                @NonNull final Response response) {
+            // parse the Content-Disposition header,
+            // see https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Disposition
+            // there can be two filename directives
+            String contentDisposition = response.getHeader("Content-Disposition");
+            if (contentDisposition != null) {
+                try {
+                    contentDisposition = Utils.decodeUrlUtf8(contentDisposition);
+                    final String[] parts = contentDisposition.split(";");
+                    for (String part : parts) {
+                        final String fileName;
+                        part = part.trim();
+                        // extract the filename
+                        if (part.startsWith("filename=")) {
+                            // remove directive and decode
+                            fileName = Utils.decodeUrlUtf8(part.substring(9));
+                        } else if (part.startsWith("filename*=")) {
+                            // The filename* directive passes the encoding of the filename, too.
+                            // The encoding is prepended to the actual filename
+                            // and the file name *should* be put into quotes.
+                            // There needs to be a character (mostly one of the quotes)
+                            // which separates the encoding from the filename
+                            part = part.substring(10); // remove directive
+                            final String encoding = Parser.matchGroup1(
+                                    "([0-9|A-Z|a-z|\\-|_]+)", part);
+                            // remove encoding and separating character
+                            part = part.substring(encoding.length() + 1);
+                            final Charset charset = Charset.forName(encoding);
+                            // decode info with the given encoding
+                            if (charset == null) {
+                                continue;
+                            }
+                            if (charset.equals(Charset.defaultCharset())) {
+                                fileName = part;
+                            } else {
+                                fileName = new String(part.getBytes(charset),
+                                        StandardCharsets.UTF_8);
+                            }
+                        } else {
+                            continue;
+                        }
+
+                        // extract the file extension / suffix
+                        final String[] p = fileName.split("\\.");
+                        String suffix = p[p.length - 1];
+                        if (suffix.endsWith("\"") || suffix.endsWith("'")) {
+                            // remove trailing quotes if present
+                            suffix = suffix.substring(0, suffix.length() - 2);
+                        }
+
+                        final MediaFormat format = MediaFormat.getFromSuffix(suffix);
+                        if (format != null) {
+                            streamsWrapper.setFormat(stream, format);
+                            return true;
+                        }
+                    }
+                } catch (final Exception ignored) { }
+            }
+            return false;
+        }
+
+        private static <X extends Stream> boolean retrieveMediaFormatFromContentTypeHeader(
+                @NonNull final X stream,
+                @NonNull final StreamInfoWrapper<X> streamsWrapper,
+                @NonNull final Response response) {
+            // try to get the format by content type
+            // some mime types are not unique for every format, those are omitted
+            final List<MediaFormat> formats = MediaFormat.getAllFromMimeType(
+                    response.getHeader("Content-Type"));
+            final List<MediaFormat> uniqueFormats = new ArrayList<>(formats.size());
+            for (int i = 0; i < formats.size(); i++) {
+                final MediaFormat format = formats.get(i);
+                if (uniqueFormats.stream().filter(f -> f.id == format.id).count() == 0) {
+                    uniqueFormats.add(format);
+                }
+            }
+            if (uniqueFormats.size() == 1) {
+                streamsWrapper.setFormat(stream, uniqueFormats.get(0));
+                return true;
+            }
+            return false;
+        }
+
+        public void resetInfo() {
             Arrays.fill(streamSizes, SIZE_UNSET);
+            for (int i = 0; i < streamsList.size(); i++) {
+                streamFormats[i] = streamsList.get(i).getFormat();
+            }
         }
 
         public static <X extends Stream> StreamInfoWrapper<X> empty() {
@@ -305,6 +455,14 @@ public class StreamItemAdapter<T extends Stream, U extends Stream> extends BaseA
 
         public void setSize(final T stream, final long sizeInBytes) {
             streamSizes[streamsList.indexOf(stream)] = sizeInBytes;
+        }
+
+        public MediaFormat getFormat(final int streamIndex) {
+            return streamFormats[streamIndex];
+        }
+
+        public void setFormat(final T stream, final MediaFormat format) {
+            streamFormats[streamsList.indexOf(stream)] = format;
         }
     }
 }
