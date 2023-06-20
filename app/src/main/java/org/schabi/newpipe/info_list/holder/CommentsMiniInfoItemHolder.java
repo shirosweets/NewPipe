@@ -2,8 +2,6 @@ package org.schabi.newpipe.info_list.holder;
 
 import static android.text.TextUtils.isEmpty;
 
-import android.graphics.Paint;
-import android.text.Layout;
 import android.text.method.LinkMovementMethod;
 import android.text.style.URLSpan;
 import android.util.Log;
@@ -13,9 +11,9 @@ import android.widget.ImageView;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.text.HtmlCompat;
 
 import org.schabi.newpipe.R;
 import org.schabi.newpipe.error.ErrorUtil;
@@ -34,24 +32,16 @@ import org.schabi.newpipe.util.NavigationHelper;
 import org.schabi.newpipe.util.PicassoHelper;
 import org.schabi.newpipe.util.external_communication.ShareUtils;
 import org.schabi.newpipe.util.text.CommentTextOnTouchListener;
-import org.schabi.newpipe.util.text.TextLinkifier;
-
-import java.util.function.Consumer;
+import org.schabi.newpipe.util.text.TextEllipsizer;
 
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
 
 public class CommentsMiniInfoItemHolder extends InfoItemHolder {
     private static final String TAG = "CommentsMiniIIHolder";
-    private static final String ELLIPSIS = "…";
 
     private static final int COMMENT_DEFAULT_LINES = 2;
-    private static final int COMMENT_EXPANDED_LINES = 1000;
-
     private final int commentHorizontalPadding;
     private final int commentVerticalPadding;
-
-    private final Paint paintAtContentSize;
-    private final float ellipsisWidthPx;
 
     private final RelativeLayout itemRoot;
     private final ImageView itemThumbnailView;
@@ -63,6 +53,8 @@ public class CommentsMiniInfoItemHolder extends InfoItemHolder {
     @Nullable private Description commentText;
     @Nullable private StreamingService streamService;
     @Nullable private String streamUrl;
+
+    @NonNull private final TextEllipsizer textEllipsizer;
 
     CommentsMiniInfoItemHolder(final InfoItemBuilder infoItemBuilder, final int layoutId,
                                final ViewGroup parent) {
@@ -79,9 +71,8 @@ public class CommentsMiniInfoItemHolder extends InfoItemHolder {
         commentVerticalPadding = (int) infoItemBuilder.getContext()
                 .getResources().getDimension(R.dimen.comments_vertical_padding);
 
-        paintAtContentSize = new Paint();
-        paintAtContentSize.setTextSize(itemContentView.getTextSize());
-        ellipsisWidthPx = paintAtContentSize.measureText(ELLIPSIS);
+        textEllipsizer = new TextEllipsizer(itemContentView, COMMENT_DEFAULT_LINES, streamService);
+        textEllipsizer.setStateChangeListener(isEllipsized -> determineMovementMethod());
     }
 
     public CommentsMiniInfoItemHolder(final InfoItemBuilder infoItemBuilder,
@@ -96,6 +87,7 @@ public class CommentsMiniInfoItemHolder extends InfoItemHolder {
             return;
         }
         final CommentsInfoItem item = (CommentsInfoItem) infoItem;
+        textEllipsizer.setContent(item.getCommentText());
 
         PicassoHelper.loadAvatar(item.getUploaderAvatarUrl()).into(itemThumbnailView);
         if (PicassoHelper.getShouldLoadImages()) {
@@ -121,7 +113,19 @@ public class CommentsMiniInfoItemHolder extends InfoItemHolder {
         }
         streamUrl = item.getUrl();
         commentText = item.getCommentText();
-        ellipsize();
+
+        //noinspection ConstantConditions
+        textEllipsizer.setStreamingService(streamService);
+        textEllipsizer.setContent(item.getCommentText());
+        textEllipsizer.setStreamUrl(item.getUrl());
+        textEllipsizer.setStateChangeListener(isEllipsized -> {
+            if (Boolean.TRUE.equals(isEllipsized)) {
+                denyLinkFocus();
+            } else {
+                determineMovementMethod();
+            }
+        });
+        textEllipsizer.ellipsize();
 
         //noinspection ClickableViewAccessibility
         itemContentView.setOnTouchListener(CommentTextOnTouchListener.INSTANCE);
@@ -143,12 +147,11 @@ public class CommentsMiniInfoItemHolder extends InfoItemHolder {
         }
 
         itemView.setOnClickListener(view -> {
-            toggleEllipsize();
+            textEllipsizer.toggle();
             if (itemBuilder.getOnCommentsSelectedListener() != null) {
                 itemBuilder.getOnCommentsSelectedListener().selected(item);
             }
         });
-
 
         itemView.setOnLongClickListener(view -> {
             if (DeviceUtils.isTv(itemBuilder.getContext())) {
@@ -202,78 +205,6 @@ public class CommentsMiniInfoItemHolder extends InfoItemHolder {
             allowLinkFocus();
         } else {
             denyLinkFocus();
-        }
-    }
-
-    private void ellipsize() {
-        itemContentView.setMaxLines(COMMENT_EXPANDED_LINES);
-        linkifyCommentContentView(v -> {
-            boolean hasEllipsis = false;
-
-            final CharSequence charSeqText = itemContentView.getText();
-            if (charSeqText != null && itemContentView.getLineCount() > COMMENT_DEFAULT_LINES) {
-                // Note that converting to String removes spans (i.e. links), but that's something
-                // we actually want since when the text is ellipsized we want all clicks on the
-                // comment to expand the comment, not to open links.
-                final String text = charSeqText.toString();
-
-                final Layout layout = itemContentView.getLayout();
-                final float lineWidth = layout.getLineWidth(COMMENT_DEFAULT_LINES - 1);
-                final float layoutWidth = layout.getWidth();
-                final int lineStart = layout.getLineStart(COMMENT_DEFAULT_LINES - 1);
-                final int lineEnd = layout.getLineEnd(COMMENT_DEFAULT_LINES - 1);
-
-                // remove characters up until there is enough space for the ellipsis
-                // (also summing 2 more pixels, just to be sure to avoid float rounding errors)
-                int end = lineEnd;
-                float removedCharactersWidth = 0.0f;
-                while (lineWidth - removedCharactersWidth + ellipsisWidthPx + 2.0f > layoutWidth
-                        && end >= lineStart) {
-                    end -= 1;
-                    // recalculate each time to account for ligatures or other similar things
-                    removedCharactersWidth = paintAtContentSize.measureText(
-                            text.substring(end, lineEnd));
-                }
-
-                // remove trailing spaces and newlines
-                while (end > 0 && Character.isWhitespace(text.charAt(end - 1))) {
-                    end -= 1;
-                }
-
-                final String newVal = text.substring(0, end) + ELLIPSIS;
-                itemContentView.setText(newVal);
-                hasEllipsis = true;
-            }
-
-            itemContentView.setMaxLines(COMMENT_DEFAULT_LINES);
-            if (hasEllipsis) {
-                denyLinkFocus();
-            } else {
-                determineMovementMethod();
-            }
-        });
-    }
-
-    private void toggleEllipsize() {
-        final CharSequence text = itemContentView.getText();
-        if (!isEmpty(text) && text.charAt(text.length() - 1) == ELLIPSIS.charAt(0)) {
-            expand();
-        } else if (itemContentView.getLineCount() > COMMENT_DEFAULT_LINES) {
-            ellipsize();
-        }
-    }
-
-    private void expand() {
-        itemContentView.setMaxLines(COMMENT_EXPANDED_LINES);
-        linkifyCommentContentView(v -> determineMovementMethod());
-    }
-
-    private void linkifyCommentContentView(@Nullable final Consumer<TextView> onCompletion) {
-        disposables.clear();
-        if (commentText != null) {
-            TextLinkifier.fromDescription(itemContentView, commentText,
-                    HtmlCompat.FROM_HTML_MODE_LEGACY, streamService, streamUrl, disposables,
-                    onCompletion);
         }
     }
 }

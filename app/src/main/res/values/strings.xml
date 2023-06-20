@@ -792,4 +792,6 @@
     <string name="audio_track_type_original">original</string>
     <string name="audio_track_type_dubbed">dubbed</string>
     <string name="audio_track_type_descriptive">descriptive</string>
+    <string name="show_more">Show more</string>
+    <string name="show_less">Show less</string>
 </resources>

@@ -3,7 +3,6 @@ package org.schabi.newpipe.fragments.list.playlist;
 import static org.schabi.newpipe.extractor.utils.Utils.isBlank;
 import static org.schabi.newpipe.ktx.ViewUtils.animate;
 import static org.schabi.newpipe.ktx.ViewUtils.animateHideRecyclerViewAllowingScrolling;
-import static org.schabi.newpipe.util.text.TextLinkifier.SET_LINK_MOVEMENT_METHOD;
 
 import android.content.Context;
 import android.os.Bundle;
@@ -19,7 +18,6 @@ import android.view.ViewGroup;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.content.res.AppCompatResources;
-import androidx.core.text.HtmlCompat;
 
 import com.google.android.material.shape.CornerFamily;
 import com.google.android.material.shape.ShapeAppearanceModel;
@@ -37,7 +35,10 @@ import org.schabi.newpipe.error.ErrorUtil;
 import org.schabi.newpipe.error.UserAction;
 import org.schabi.newpipe.extractor.InfoItem;
 import org.schabi.newpipe.extractor.ListExtractor;
+import org.schabi.newpipe.extractor.NewPipe;
 import org.schabi.newpipe.extractor.ServiceList;
+import org.schabi.newpipe.extractor.StreamingService;
+import org.schabi.newpipe.extractor.exceptions.ExtractionException;
 import org.schabi.newpipe.extractor.playlist.PlaylistInfo;
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper;
 import org.schabi.newpipe.extractor.stream.Description;
@@ -55,7 +56,7 @@ import org.schabi.newpipe.util.Localization;
 import org.schabi.newpipe.util.NavigationHelper;
 import org.schabi.newpipe.util.PicassoHelper;
 import org.schabi.newpipe.util.external_communication.ShareUtils;
-import org.schabi.newpipe.util.text.TextLinkifier;
+import org.schabi.newpipe.util.text.TextEllipsizer;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -326,16 +327,34 @@ public class PlaylistFragment extends BaseListInfoFragment<StreamInfoItem, Playl
         headerBinding.playlistStreamCount.setText(Localization
                 .localizeStreamCount(getContext(), result.getStreamCount()));
 
+        StreamingService service;
+        try {
+            service = NewPipe.getService(result.getServiceId());
+        } catch (final ExtractionException e) {
+            service = ServiceList.YouTube;
+        }
+
         final Description description = result.getDescription();
         if (description != null && description != Description.EMPTY_DESCRIPTION
                 && !isBlank(description.getContent())) {
-            TextLinkifier.fromDescription(headerBinding.playlistDescription,
-                    description, HtmlCompat.FROM_HTML_MODE_LEGACY,
-                    result.getService(), result.getUrl(),
-                    disposables, SET_LINK_MOVEMENT_METHOD);
-            headerBinding.playlistDescription.setVisibility(View.VISIBLE);
+            final TextEllipsizer ellipsizer = new TextEllipsizer(
+                    headerBinding.playlistDescription, 5, service);
+            ellipsizer.setStateChangeListener(isEllipsized ->
+                headerBinding.playlistDescriptionReadMore.setText(
+                        Boolean.TRUE.equals(isEllipsized) ? R.string.show_more : R.string.show_less
+                ));
+            ellipsizer.setOnContentChanged(canBeEllipsized -> {
+                headerBinding.playlistDescriptionReadMore.setVisibility(
+                        Boolean.TRUE.equals(canBeEllipsized) ? View.VISIBLE : View.GONE);
+                if (Boolean.TRUE.equals(canBeEllipsized)) {
+                    ellipsizer.ellipsize();
+                }
+            });
+            ellipsizer.setContent(description);
+            headerBinding.playlistDescriptionReadMore.setOnClickListener(v -> ellipsizer.toggle());
         } else {
             headerBinding.playlistDescription.setVisibility(View.GONE);
+            headerBinding.playlistDescriptionReadMore.setVisibility(View.GONE);
         }
 
         if (!result.getErrors().isEmpty()) {
