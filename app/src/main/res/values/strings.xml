@@ -790,4 +790,15 @@
     <string name="audio_track_type_original">original</string>
     <string name="audio_track_type_dubbed">dubbed</string>
     <string name="audio_track_type_descriptive">descriptive</string>
+    <string name="open_play_queue">open play queue</string>
+    <string name="toggle_fullscreen">toggle fullscreen</string>
+    <string name="toggle_screen_orientation">toggle screen orientation</string>
+    <string name="previous_stream">previous stream</string>
+    <string name="next_stream">next stream</string>
+    <string name="play">play</string>
+    <string name="replay">replay</string>
+    <string name="more_options">more options</string>
+    <string name="duration">duration</string>
+    <string name="rewind">rewind</string>
+    <string name="forward">forward</string>
 </resources>
